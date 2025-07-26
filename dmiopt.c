@@ -21,9 +21,13 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifndef _MSC_VER
 #include <strings.h>
-#include <stdlib.h>
 #include <getopt.h>
+#else
+#include "getopt.h"
+#endif
+#include <stdlib.h>
 
 #include "config.h"
 #include "types.h"
@@ -385,7 +389,9 @@ void print_help(void)
 	static const char *help =
 		"Usage: dmidecode [OPTIONS]\n"
 		"Options are:\n"
+#ifndef _WIN32
 		" -d, --dev-mem FILE     Read memory from device FILE (default: " DEFAULT_MEM_DEV ")\n"
+#endif
 		" -h, --help             Display this help text and exit\n"
 		" -q, --quiet            Less verbose output\n"
 		"     --no-quirks        Decode everything without quirks\n"

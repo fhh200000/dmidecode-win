@@ -39,7 +39,13 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#ifndef _WIN32
 #include <unistd.h>
+#else
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+#include <io.h>
+#endif
 #include <string.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -54,7 +60,7 @@ static int myread(int fd, u8 *buf, size_t count, const char *prefix)
 
 	while (r2 != count && r != 0)
 	{
-		r = read(fd, buf + r2, count - r2);
+		r = _read(fd, buf + r2, (unsigned int)count - r2);
 		if (r == -1)
 		{
 			if (errno != EINTR)
@@ -98,8 +104,53 @@ int checksum(const u8 *buf, size_t len)
 void *read_file(off_t base, size_t *max_len, const char *filename)
 {
 	struct stat statbuf;
-	int fd;
-	u8 *p;
+	int fd = -1;
+	u8 *p = NULL;
+
+#ifdef _WIN32
+	static size_t smBiosDataSize = 0;
+	static RawSMBIOSData* smBiosData = NULL;
+
+	if (!strcmp(filename, DEFAULT_MEM_DEV)) {
+		if (smBiosData == NULL) {
+			DWORD bytesWritten = 0;
+
+			// Query size of SMBIOS data.
+			smBiosDataSize = GetSystemFirmwareTable('RSMB', 0, NULL, 0);
+
+			// Allocate memory for SMBIOS data
+			smBiosData = (RawSMBIOSData*)HeapAlloc(GetProcessHeap(), 0, smBiosDataSize);
+			if (!smBiosData) {
+				fprintf(stderr, "%s: Can't allocate memory for SMBIOS table\n",
+					filename);
+				goto out;
+			}
+
+			// Retrieve the SMBIOS table
+			bytesWritten = GetSystemFirmwareTable('RSMB', 0, smBiosData, smBiosDataSize);
+
+			if (bytesWritten != smBiosDataSize) {
+				fprintf(stderr, "%s: Can't get SMBIOS data\n",
+					filename);
+				goto out;
+			}
+		}
+		if (base >= smBiosDataSize)
+		{
+			fprintf(stderr, "Win32: Can't read data beyond EOF\n");
+			p = NULL;
+			goto out;
+		}
+		*max_len = *max_len > smBiosDataSize - base ? smBiosDataSize - base : *max_len;
+		if ((p = malloc(*max_len)) == NULL)
+		{
+			perror("malloc");
+			goto out;
+		}
+		memcpy(p, ((char*)smBiosData)+base, *max_len);
+		goto out;
+	}
+#endif
 
 	/*
 	 * Don't print error message on missing file, as we will try to read
@@ -149,9 +200,10 @@ err_free:
 	p = NULL;
 
 out:
+#ifndef WIN32
 	if (close(fd) == -1)
 		perror(filename);
-
+#endif
 	return p;
 }
 
@@ -173,6 +225,7 @@ static void safe_memcpy(void *dest, const void *src, size_t n)
  * Copy a physical memory chunk into a memory buffer.
  * This function allocates memory.
  */
+#ifndef _WIN32 /* Unsupported on Windows */
 void *mem_chunk(off_t base, size_t len, const char *devmem)
 {
 	struct stat statbuf;
@@ -261,6 +314,7 @@ out:
 
 	return p;
 }
+#endif
 
 /* Returns end - start + 1, assuming start < end */
 u64 u64_range(u64 start, u64 end)

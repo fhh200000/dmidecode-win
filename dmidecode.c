@@ -65,11 +65,16 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <strings.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#else
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 
 #if defined(__FreeBSD__) || defined(__DragonFly__)
 #include <errno.h>
@@ -3206,7 +3211,7 @@ static const char *dmi_pointing_device_type(u8 code)
 static const char *dmi_pointing_device_interface(u8 code)
 {
 	/* 7.22.2 */
-	static const char *interface[] = {
+	static const char *interface_name[] = {
 		"Other", /* 0x01 */
 		"Unknown",
 		"Serial",
@@ -3225,7 +3230,7 @@ static const char *dmi_pointing_device_interface(u8 code)
 	};
 
 	if (code >= 0x01 && code <= 0x08)
-		return interface[code - 0x01];
+		return interface_name[code - 0x01];
 	if (code >= 0xA0 && code <= 0xA4)
 		return interface_0xA0[code - 0xA0];
 	return out_of_spec;
@@ -3926,7 +3931,7 @@ static const char *dmi_address_type(u8 type)
 static const char *dmi_address_decode(u8 *data, char *storage, u8 addrtype)
 {
 	if (addrtype == 0x1) /* IPv4 */
-		return inet_ntop(AF_INET, data, storage, 64);
+ 		return inet_ntop(AF_INET, data, storage, 64);
 	if (addrtype == 0x2) /* IPv6 */
 		return inet_ntop(AF_INET6, data, storage, 64);
 	return out_of_spec;
@@ -5839,6 +5844,7 @@ static u8 *dmi_table_get(off_t base, u32 *len, u16 num, u32 ver,
 		pr_sep();
 	}
 
+#ifndef _WIN32
 	if ((flags & FLAG_NO_FILE_OFFSET) || (opt.flags & FLAG_FROM_DUMP))
 	{
 		/*
@@ -5860,9 +5866,21 @@ static u8 *dmi_table_get(off_t base, u32 *len, u16 num, u32 ver,
 		}
 		*len = size;
 	}
-	else
+	else {
 		buf = mem_chunk(base, *len, devmem);
-
+	}
+#else
+	size_t size = *len;
+	buf = read_file(flags & FLAG_NO_FILE_OFFSET ? 0 : base,
+		&size, devmem);
+	if (!(opt.flags & FLAG_QUIET) && num && size != (size_t)*len)
+	{
+		fprintf(stderr, "Wrong DMI structures length: %u bytes "
+			"announced, only %lu bytes available.\n",
+			*len, (unsigned long)size);
+	}
+	*len = size;
+#endif
 	if (buf == NULL)
 	{
 		fprintf(stderr, "Failed to read table, sorry.\n");
@@ -5939,7 +5957,7 @@ static int smbios3_decode(u8 *buf, size_t buf_len, const char *devmem, u32 flags
 
 	/* Maximum length, may get trimmed */
 	len = DWORD(buf + 0x0C);
-	table = dmi_table_get(((off_t)offset.h << 32) | offset.l, &len, 0, ver,
+	table = dmi_table_get(offset.h | offset.l, &len, 0, ver,
 			      devmem, flags | FLAG_STOP_AT_EOT);
 	if (table == NULL)
 		return 1;
@@ -5963,6 +5981,71 @@ static int smbios3_decode(u8 *buf, size_t buf_len, const char *devmem, u32 flags
 
 	return 1;
 }
+
+#ifdef _WIN32
+static int smbios_win32_decode(u8* buf, size_t buf_len, const char* devmem, u32 flags)
+{
+	RawSMBIOSData* data = (RawSMBIOSData*)buf;
+	u32 ver = 0;
+	/* Don't let checksum run beyond the buffer */
+	if (data->Length > buf_len)
+	{
+		fprintf(stderr,
+			"Entry point length too large (%u bytes, expected %u).\n",
+			(unsigned int)buf[0x06], 0x18U);
+		return 0;
+	}
+
+	ver = (data->SMBIOSMajorVersion << 16) + (data->SMBIOSMinorVersion << 8) + data->DmiRevision;
+	if (!(opt.flags & FLAG_QUIET))
+		pr_info("SMBIOS %u.%u.%u present.",
+			data->SMBIOSMajorVersion, data->SMBIOSMinorVersion, data->DmiRevision);
+
+	if (opt.flags & FLAG_DUMP_BIN)
+	{
+#pragma pack(push,1)
+		struct {
+			u8  AnchorString[5];
+			u8  Checksum;
+			u8  EntrypointLength;
+			u8  MajorVersion;
+			u8  MinorVersion;
+			u8  DocRev;
+			u8  EntryPointRev;
+			u8  Reserved;
+			u32 StructureTableMaxSize;
+			u64 StructureTableAddress;
+			u8  Padding[8];
+		} crafted = {
+			.AnchorString = {'_','S','M','3','_'},
+			.Checksum = 0,
+			.EntrypointLength = 0x18,
+			.MajorVersion = data->SMBIOSMajorVersion,
+			.MinorVersion = data->SMBIOSMinorVersion,
+			.DocRev = data->DmiRevision,
+			.EntryPointRev = 0x1,
+			.Reserved = 0,
+			.StructureTableMaxSize = 0x20,
+			.StructureTableAddress = 0x0,
+			.Padding = {0,0,0,0,0,0,0,0}
+		};
+
+		u8 checksum = 0;
+		for (size_t i = 0; i < sizeof(crafted); i++) {
+			checksum += ((u8*)&crafted)[i];
+		}
+		crafted.Checksum = (u8)(0 - (u32)checksum);
+#pragma pack(pop)
+		dmi_table_dump((u8*)&crafted, crafted.StructureTableMaxSize, data->SMBIOSTableData, data->Length);
+	}
+	else
+	{
+		dmi_table_decode(data->SMBIOSTableData, data->Length, 0, ver >> 8,
+			flags | FLAG_STOP_AT_EOT);
+	}
+	return 1;
+}
+#endif
 
 static void dmi_fixup_version(u16 *ver)
 {
@@ -6087,6 +6170,7 @@ static int legacy_decode(u8 *buf, const char *devmem, u32 flags)
 	return 1;
 }
 
+#ifndef _WIN32 // Not supported on Win32.
 /*
  * Probe for EFI interface
  */
@@ -6166,6 +6250,7 @@ static int address_from_efi(off_t *address)
 
 	return ret;
 }
+#endif
 
 int main(int argc, char * const argv[])
 {
@@ -6176,14 +6261,16 @@ int main(int argc, char * const argv[])
 	int efi;
 	u8 *buf = NULL;
 
+#ifndef _WIN32
 	/*
 	 * We don't want stdout and stderr to be mixed up if both are
 	 * redirected to the same file.
 	 */
 	setlinebuf(stdout);
 	setlinebuf(stderr);
+#endif
 
-	if (sizeof(u8) != 1 || sizeof(u16) != 2 || sizeof(u32) != 4 || '\0' != 0)
+	if ((sizeof(u8) != 1) || (sizeof(u16) != 2) || (sizeof(u32) != 4) || ('\0' != 0))
 	{
 		fprintf(stderr, "%s: compiler incompatibility\n", argv[0]);
 		exit(255);
@@ -6259,6 +6346,7 @@ int main(int argc, char * const argv[])
 		goto done;
 	}
 
+#ifndef _WIN32 // Not supported on Windows
 	/*
 	 * First try reading from sysfs tables.  The entry point file could
 	 * contain one of several types of entry points, so read enough for
@@ -6369,6 +6457,25 @@ memory_scan:
 	}
 #endif
 
+#else
+	size = (size_t)-1;
+	if (!(opt.flags & FLAG_QUIET))
+		pr_info("Reading SMBIOS/DMI data from Win32 API.");
+	if ((buf = read_file(0, &size, DEFAULT_MEM_DEV)) == NULL)
+	{
+		ret = 1;
+		goto exit_free;
+	}
+	/* Truncated entry point can't be processed */
+	if (size < 0x20)
+	{
+		ret = 1;
+		goto done;
+	}
+
+	if (smbios_win32_decode(buf, size, DEFAULT_MEM_DEV, 0))
+			found++;
+#endif
 done:
 	if (!found && !(opt.flags & FLAG_QUIET))
 		pr_comment("No SMBIOS nor DMI entry point found, sorry.");

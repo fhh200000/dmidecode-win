@@ -621,7 +621,9 @@ static int parse_command_line(int argc, char * const argv[])
 		switch (option)
 		{
 			case 'd':
+#ifndef _WIN32
 				opt.devmem = optarg;
+#endif
 				break;
 			case 'P':
 				if (strcmp(optarg, "full") == 0)

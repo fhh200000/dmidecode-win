@@ -3,3 +3,5 @@ dmidecode
 ownership
 vpddecode
 *.o
+/.vs
+/out

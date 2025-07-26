@@ -55,5 +55,19 @@ static inline u64 U64(u32 low, u32 high)
 #define DWORD(x) (u32)(*(const u32 *)(x))
 #define QWORD(x) (*(const u64 *)(x))
 #endif /* ALIGNMENT_WORKAROUND || BIGENDIAN */
-
+#ifdef _MSC_VER
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
+#ifdef _WIN32
+typedef struct
+{
+	u8  Used20CallingMethod;
+	u8  SMBIOSMajorVersion;
+	u8  SMBIOSMinorVersion;
+	u8  DmiRevision;
+	u32 Length;
+	u8  SMBIOSTableData[];
+} RawSMBIOSData;
+#endif
 #endif
